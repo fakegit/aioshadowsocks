@@ -69,34 +69,40 @@ class LocalHandler(TimeoutHandler):
         '''
         针对tcp/udp分别关闭连接
         '''
-        if self._transport_protocol == flag.TRANSPORT_TCP:
-            if self._transport is not None:
-                self._transport.close()
-            if self.user and self.user.tcp_count > 0:
-                self.user.tcp_count -= 1
-        elif self._transport_protocol == flag.TRANSPORT_UDP:
-            pass
-        else:
-            raise NotImplementedError
+        try:
+            if self._transport_protocol == flag.TRANSPORT_TCP:
+                if self._transport is not None:
+                    self._transport.close()
+                if self.user and self.user.tcp_count > 0:
+                    self.user.tcp_count -= 1
+            elif self._transport_protocol == flag.TRANSPORT_UDP:
+                pass
+            else:
+                raise NotImplementedError
+        except:
+            pool.sentry.captureException()
 
     def write(self, data):
         '''
         针对tcp/udp分别写数据
         '''
-        if self._transport_protocol == flag.TRANSPORT_TCP:
-            try:
-                self._transport.write(data)
-                # 记录下载流量
-                self.user.once_used_d += len(data)
-            except MemoryError:
-                logging.warning(
-                    'memory boom user_id: {}'.format(self.user.user_id))
-                pool.add_user_to_jail(self.user.user_id)
-                self.close()
-        elif self._transport_protocol == flag.TRANSPORT_UDP:
-            self._transport.sendto(data, self._peername)
-        else:
-            raise NotImplementedError
+        try:
+            if self._transport_protocol == flag.TRANSPORT_TCP:
+                try:
+                    self._transport.write(data)
+                    # 记录下载流量
+                    self.user.once_used_d += len(data)
+                except MemoryError:
+                    logging.warning(
+                        'memory boom user_id: {}'.format(self.user.user_id))
+                    pool.add_user_to_jail(self.user.user_id)
+                    self.close()
+            elif self._transport_protocol == flag.TRANSPORT_UDP:
+                self._transport.sendto(data, self._peername)
+            else:
+                raise NotImplementedError
+        except:
+            pool.sentry.captureException()
 
     def handle_tcp_connection_made(self, transport):
         '''
@@ -105,58 +111,67 @@ class LocalHandler(TimeoutHandler):
         get_extra_info asyncio Transports api
         doc: https://docs.python.org/3/library/asyncio-protocol.html
         '''
-        # filter tcp connction
-        if not pool.filter_user(self.user):
-            transport.close()
-            return
-
-        self._stage = self.STAGE_INIT
-        self._transport_protocol = flag.TRANSPORT_TCP
-        self._transport = transport
-        # get the remote address to which the socket is connected
-        self._peername = self._transport.get_extra_info('peername')
-        self.keep_alive_open()
-
         try:
-            self._cryptor = Cryptor(self._method, self._key)
-            logging.debug('tcp connection made')
-        except NotImplementedError:
-            logging.warning('not support cipher')
-            self.close()
+            # filter tcp connction
+            if not pool.filter_user(self.user):
+                transport.close()
+                return
+
+            self._stage = self.STAGE_INIT
+            self._transport_protocol = flag.TRANSPORT_TCP
+            self._transport = transport
+            # get the remote address to which the socket is connected
+            self._peername = self._transport.get_extra_info('peername')
+            self.keep_alive_open()
+
+            try:
+                self._cryptor = Cryptor(self._method, self._key)
+                logging.debug('tcp connection made')
+            except NotImplementedError:
+                logging.warning('not support cipher')
+                self.close()
+        except:
+            pool.sentry.captureException()
 
     def handle_udp_connection_made(self, transport, peername):
         '''
         处理udp连接
         '''
-        self._stage = self.STAGE_INIT
-        self._transport = transport
-        self._transport_protocol = flag.TRANSPORT_UDP
-        self._peername = peername
-
         try:
-            self._cryptor = Cryptor(self._method, self._key)
-            logging.debug('udp connection made')
-        except NotImplementedError:
-            logging.warning('not support cipher')
-            self.close()
+            self._stage = self.STAGE_INIT
+            self._transport = transport
+            self._transport_protocol = flag.TRANSPORT_UDP
+            self._peername = peername
+
+            try:
+                self._cryptor = Cryptor(self._method, self._key)
+                logging.debug('udp connection made')
+            except NotImplementedError:
+                logging.warning('not support cipher')
+                self.close()
+        except:
+            pool.sentry.captureException()
 
     def handle_data_received(self, data):
-        # 累计并检查用户流量
-        self.user.once_used_u += len(data)
-        data = self._cryptor.decrypt(data)
+        try:
+            # 累计并检查用户流量
+            self.user.once_used_u += len(data)
+            data = self._cryptor.decrypt(data)
 
-        if self._stage == self.STAGE_INIT:
-            coro = self._handle_stage_init(data)
-            asyncio.ensure_future(coro)
-        elif self._stage == self.STAGE_CONNECT:
-            coro = self._handle_stage_connect(data)
-            asyncio.ensure_future(coro)
-        elif self._stage == self.STAGE_STREAM:
-            self._handle_stage_stream(data)
-        elif self._stage == self.STAGE_ERROR:
-            self._handle_stage_error()
-        else:
-            logging.warning('unknown stage:{}'.format(self._stage))
+            if self._stage == self.STAGE_INIT:
+                coro = self._handle_stage_init(data)
+                asyncio.ensure_future(coro)
+            elif self._stage == self.STAGE_CONNECT:
+                coro = self._handle_stage_connect(data)
+                asyncio.ensure_future(coro)
+            elif self._stage == self.STAGE_STREAM:
+                self._handle_stage_stream(data)
+            elif self._stage == self.STAGE_ERROR:
+                self._handle_stage_error()
+            else:
+                logging.warning('unknown stage:{}'.format(self._stage))
+        except:
+            pool.sentry.captureException()
 
     def handle_eof_received(self):
         logging.debug('eof received')
@@ -176,91 +191,98 @@ class LocalHandler(TimeoutHandler):
         '''
         from shadowsocks.tcpreply import RemoteTCP  # noqa
         from shadowsocks.udpreply import RemoteUDP  # noqa
-
-        atype = data[0]
-        if atype == flag.ATYPE_IPV4:
-            dst_addr = socket.inet_ntop(socket.AF_INET, data[1:5])
-            dst_port = struct.unpack('!H', data[5:7])[0]
-            payload = data[7:]
-        elif atype == flag.ATYPE_IPV6:
-            dst_addr = socket.inet_ntop(socket.AF_INET6, data[1:17])
-            dst_port = struct.unpack('!H', data[17:19])[0]
-            payload = data[19:]
-        elif atype == flag.ATYPE_DOMAINNAME:
-            domain_length = data[1]
-            domain_index = 2 + domain_length
-            dst_addr = data[2:domain_index]
-            dst_port = struct.unpack(
-                '!H', data[domain_index:domain_index + 2])[0]
-            payload = data[domain_index + 2:]
-        else:
-            logging.warning(
-                'unknown atype: {} user: {}'.format(atype, self.user))
-            self.close()
-            return
-
-        # 获取事件循环
-        loop = asyncio.get_event_loop()
-        if self._transport_protocol == flag.TRANSPORT_TCP:
-            self._stage = self.STAGE_CONNECT
-
-            # 尝试建立tcp连接，成功的话将会返回 (transport,protocol)
-            tcp_coro = loop.create_connection(lambda: RemoteTCP(
-                dst_addr, dst_port, payload, self._method, self._key, self),
-                dst_addr, dst_port)
-            try:
-                remote_transport, remote_instance = await tcp_coro
-                # 记录用户的tcp连接数
-                self.user.tcp_count += 1
-            except (IOError, OSError) as e:
-                logging.debug(
-                    'connection faild , {} e: {}'.format(type(e), e))
-                self.close()
-                self._stage = self.STAGE_DESTROY
-            except Exception as e:
-                logging.warning(
-                    'connection failed, {} e: {}'.format(type(e), e))
-                self.close()
-                self._stage = self.STAGE_ERROR
+        try:
+            atype = data[0]
+            if atype == flag.ATYPE_IPV4:
+                dst_addr = socket.inet_ntop(socket.AF_INET, data[1:5])
+                dst_port = struct.unpack('!H', data[5:7])[0]
+                payload = data[7:]
+            elif atype == flag.ATYPE_IPV6:
+                dst_addr = socket.inet_ntop(socket.AF_INET6, data[1:17])
+                dst_port = struct.unpack('!H', data[17:19])[0]
+                payload = data[19:]
+            elif atype == flag.ATYPE_DOMAINNAME:
+                domain_length = data[1]
+                domain_index = 2 + domain_length
+                dst_addr = data[2:domain_index]
+                dst_port = struct.unpack(
+                    '!H', data[domain_index:domain_index + 2])[0]
+                payload = data[domain_index + 2:]
             else:
-                logging.debug(
-                    'connection established,remote {}'.format(remote_instance))
-                self._remote = remote_instance
-                self._stage = self.STAGE_STREAM
-        elif self._transport_protocol == flag.TRANSPORT_UDP:
-            self._stage = self.STAGE_INIT
-            # 异步建立udp连接，并存入future对象
-            udp_coro = loop.create_datagram_endpoint(lambda: RemoteUDP(
-                dst_addr, dst_port, payload, self._method, self._key,  self),
-                remote_addr=(dst_addr, dst_port))
-            asyncio.ensure_future(udp_coro)
-        else:
-            raise NotImplementedError
+                logging.warning(
+                    'unknown atype: {} user: {}'.format(atype, self.user))
+                self.close()
+                return
+
+            # 获取事件循环
+            loop = asyncio.get_event_loop()
+            if self._transport_protocol == flag.TRANSPORT_TCP:
+                self._stage = self.STAGE_CONNECT
+
+                # 尝试建立tcp连接，成功的话将会返回 (transport,protocol)
+                tcp_coro = loop.create_connection(lambda: RemoteTCP(
+                    dst_addr, dst_port, payload, self._method, self._key, self),
+                    dst_addr, dst_port)
+                try:
+                    remote_transport, remote_instance = await tcp_coro
+                    # 记录用户的tcp连接数
+                    self.user.tcp_count += 1
+                except (IOError, OSError) as e:
+                    logging.debug(
+                        'connection faild , {} e: {}'.format(type(e), e))
+                    self.close()
+                    self._stage = self.STAGE_DESTROY
+                except Exception as e:
+                    logging.warning(
+                        'connection failed, {} e: {}'.format(type(e), e))
+                    self.close()
+                    self._stage = self.STAGE_ERROR
+                else:
+                    logging.debug(
+                        'connection established,remote {}'.format(remote_instance))
+                    self._remote = remote_instance
+                    self._stage = self.STAGE_STREAM
+            elif self._transport_protocol == flag.TRANSPORT_UDP:
+                self._stage = self.STAGE_INIT
+                # 异步建立udp连接，并存入future对象
+                udp_coro = loop.create_datagram_endpoint(lambda: RemoteUDP(
+                    dst_addr, dst_port, payload, self._method, self._key,  self),
+                    remote_addr=(dst_addr, dst_port))
+                asyncio.ensure_future(udp_coro)
+            else:
+                raise NotImplementedError
+        except:
+            pool.sentry.captureException()
 
     async def _handle_stage_connect(self, data):
-
-        logging.debug('wait until the connection established')
-        # 在握手之后，会耗费一定时间来来和remote建立连接
-        # 但是ss-client并不会等这个时间 所以我们在这里手动sleep一会
-        for i in range(25):
-            if self._stage == self.STAGE_CONNECT:
-                await asyncio.sleep(0.2)
-            elif self._stage == self.STAGE_STREAM:
-                logging.debug('connection established')
-                self._remote.write(data)
-                return
-            else:
-                logging.debug(
-                    'some error happed stage {}'.format(self._stage))
-        #  5s之后连接还没建立的话 超时处理
-        logging.warning(
-            'time out to connect remote stage {}'.format(self._stage))
-        return
+        try:
+            logging.debug('wait until the connection established')
+            # 在握手之后，会耗费一定时间来来和remote建立连接
+            # 但是ss-client并不会等这个时间 所以我们在这里手动sleep一会
+            for i in range(25):
+                if self._stage == self.STAGE_CONNECT:
+                    await asyncio.sleep(0.2)
+                elif self._stage == self.STAGE_STREAM:
+                    logging.debug('connection established')
+                    self._remote.write(data)
+                    return
+                else:
+                    logging.debug(
+                        'some error happed stage {}'.format(self._stage))
+            #  5s之后连接还没建立的话 超时处理
+            logging.warning(
+                'time out to connect remote stage {}'.format(self._stage))
+            return
+        except:
+            pool.sentry.captureException()
 
     def _handle_stage_stream(self, data):
-        logging.debug('realy data length {}'.format(len(data)))
-        self.keep_alive_active()
-        self._remote.write(data)
+        try:
+            logging.debug('realy data length {}'.format(len(data)))
+            self.keep_alive_active()
+            self._remote.write(data)
+        except:
+            pool.sentry.captureException()
 
     def _handle_stage_error(self):
         self.close()

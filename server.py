@@ -9,9 +9,14 @@ from shadowsocks.user_tasks import UserTasks
 from shadowsocks.logger import init_logger_config
 
 
+from raven import Client
+from raven_aiohttp import AioHttpTransport
+
+
 def run_servers(transfer_type):
     # 初始化tansfer
     pool.init_transfer(transfer_type)
+    pool.sentry = Client('dsn', transport=AioHttpTransport)
 
     # 启动定时任务
     user_tasks = UserTasks(pool)
