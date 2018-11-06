@@ -73,7 +73,7 @@ class LocalHandler(TimeoutHandler):
             if self._transport_protocol == flag.TRANSPORT_TCP:
                 if self._transport is not None:
                     self._transport.close()
-                if self.user and self.user.tcp_count > 0:
+                if self.user.tcp_count > 0:
                     self.user.tcp_count -= 1
             elif self._transport_protocol == flag.TRANSPORT_UDP:
                 pass
@@ -81,6 +81,7 @@ class LocalHandler(TimeoutHandler):
                 raise NotImplementedError
         except:
             pool.sentry.captureException()
+
 
     def write(self, data):
         '''
@@ -154,9 +155,13 @@ class LocalHandler(TimeoutHandler):
 
     def handle_data_received(self, data):
         try:
+            try:
+                data = self._cryptor.decrypt(data)
+            except RuntimeError as e:
+                logging.warning('decrypt data error {}'.format(e))
+                self.close()
             # 累计并检查用户流量
             self.user.once_used_u += len(data)
-            data = self._cryptor.decrypt(data)
 
             if self._stage == self.STAGE_INIT:
                 coro = self._handle_stage_init(data)
