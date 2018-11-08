@@ -73,15 +73,12 @@ class LocalHandler(TimeoutHandler):
         self._cryptor = None
         self._peername = None
         self._transport = None
-        self._transport_protocol = None
-        self._stage = None
+        self._stage = self.STAGE_DESTROY
 
     def close(self):
         try:
             if self._transport:
                 self._transport.close()
-            if self._remote:
-                self._remote.close()
             if self.user and self.user.tcp_count > 0:
                 self.user.tcp_count -= 1
             self.destory()
@@ -196,7 +193,9 @@ class LocalHandler(TimeoutHandler):
 
     def handle_connection_lost(self, exc):
         logging.debug('lost exc={exc}'.format(exc=exc))
-        self.close()
+        if self._remote is not None:
+            self._remote.close()
+            self.destory()
 
     async def _handle_stage_init(self, data):
         '''
