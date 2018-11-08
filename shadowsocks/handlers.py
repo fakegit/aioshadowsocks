@@ -1,11 +1,10 @@
 import time
-import socket
-import struct
 import logging
 import asyncio
 
 from shadowsocks.cryptor import Cryptor
 from shadowsocks.server_pool import pool
+from shadowsocks.utils import parse_header
 from shadowsocks import protocol_flag as flag
 
 
@@ -65,23 +64,29 @@ class LocalHandler(TimeoutHandler):
         self._transport_protocol = None
         self._stage = self.STAGE_DESTROY
 
+    def destory(self):
+        '''尝试优化一些内存泄露的问题'''
+        self.user = None
+        self._key = None
+        self._method = None
+        self._remote = None
+        self._cryptor = None
+        self._peername = None
+        self._transport = None
+        self._transport_protocol = None
+        self._stage = None
+
     def close(self):
-        '''
-        针对tcp/udp分别关闭连接
-        '''
         try:
-            if self._transport_protocol == flag.TRANSPORT_TCP:
-                if self._transport is not None:
-                    self._transport.close()
-                if self.user.tcp_count > 0:
-                    self.user.tcp_count -= 1
-            elif self._transport_protocol == flag.TRANSPORT_UDP:
-                pass
-            else:
-                raise NotImplementedError
+            if self._transport:
+                self._transport.close()
+            if self._remote:
+                self._remote.close()
+            if self.user and self.user.tcp_count > 0:
+                self.user.tcp_count -= 1
+            self.destory()
         except:
             pool.sentry.captureException()
-
 
     def write(self, data):
         '''
@@ -119,6 +124,7 @@ class LocalHandler(TimeoutHandler):
             # filter tcp connction
             if not pool.filter_user(self.user):
                 transport.close()
+                self.destory()
                 return
 
             self._stage = self.STAGE_INIT
@@ -133,7 +139,8 @@ class LocalHandler(TimeoutHandler):
                 logging.debug('tcp connection made')
             except NotImplementedError:
                 logging.warning('not support cipher')
-                self.close()
+                transport.close()
+                self.destory()
         except:
             pool.sentry.captureException()
 
@@ -152,19 +159,21 @@ class LocalHandler(TimeoutHandler):
                 logging.debug('udp connection made')
             except NotImplementedError:
                 logging.warning('not support cipher')
-                self.close()
+                transport.close()
+                self.destory()
         except:
             pool.sentry.captureException()
 
     def handle_data_received(self, data):
         try:
+            # 累计并检查用户流量
+            self.user.once_used_u += len(data)
             try:
                 data = self._cryptor.decrypt(data)
             except RuntimeError as e:
                 logging.warning('decrypt data error {}'.format(e))
                 self.close()
-            # 累计并检查用户流量
-            self.user.once_used_u += len(data)
+                return
 
             if self._stage == self.STAGE_INIT:
                 coro = self._handle_stage_init(data)
@@ -187,8 +196,7 @@ class LocalHandler(TimeoutHandler):
 
     def handle_connection_lost(self, exc):
         logging.debug('lost exc={exc}'.format(exc=exc))
-        if self._remote is not None:
-            self._remote.close()
+        self.close()
 
     async def _handle_stage_init(self, data):
         '''
@@ -197,30 +205,17 @@ class LocalHandler(TimeoutHandler):
         doc:
         https://docs.python.org/3/library/asyncio-eventloop.html
         '''
-        from shadowsocks.tcpreply import RemoteTCP  # noqa
-        from shadowsocks.udpreply import RemoteUDP  # noqa
+        from shadowsocks.tcpreply import RemoteTCP
+        from shadowsocks.udpreply import RemoteUDP
+
         try:
-            atype = data[0]
-            if atype == flag.ATYPE_IPV4:
-                dst_addr = socket.inet_ntop(socket.AF_INET, data[1:5])
-                dst_port = struct.unpack('!H', data[5:7])[0]
-                payload = data[7:]
-            elif atype == flag.ATYPE_IPV6:
-                dst_addr = socket.inet_ntop(socket.AF_INET6, data[1:17])
-                dst_port = struct.unpack('!H', data[17:19])[0]
-                payload = data[19:]
-            elif atype == flag.ATYPE_DOMAINNAME:
-                domain_length = data[1]
-                domain_index = 2 + domain_length
-                dst_addr = data[2:domain_index]
-                dst_port = struct.unpack(
-                    '!H', data[domain_index:domain_index + 2])[0]
-                payload = data[domain_index + 2:]
-            else:
+            atype, dst_addr, dst_port, header_length = parse_header(data)
+
+            if not dst_addr:
                 logging.warning(
-                    'unknown atype: {} user: {}'.format(atype, self.user))
-                self.close()
-                return
+                    'not valid data atype：{} user: {}'.format(atype, self.user))
+            else:
+                payload = data[header_length:]
 
             # 获取事件循环
             loop = asyncio.get_event_loop()
@@ -243,8 +238,8 @@ class LocalHandler(TimeoutHandler):
                 except Exception as e:
                     logging.warning(
                         'connection failed, {} e: {}'.format(type(e), e))
-                    self.close()
                     self._stage = self.STAGE_ERROR
+                    self.close()
                 else:
                     logging.debug(
                         'connection established,remote {}'.format(remote_instance))
@@ -280,7 +275,7 @@ class LocalHandler(TimeoutHandler):
             #  5s之后连接还没建立的话 超时处理
             logging.warning(
                 'time out to connect remote stage {}'.format(self._stage))
-            return
+            self.close()
         except:
             pool.sentry.captureException()
 
