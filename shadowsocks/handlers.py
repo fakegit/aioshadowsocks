@@ -217,6 +217,7 @@ class LocalHandler(TimeoutHandler):
             if not dst_addr:
                 logging.warning(
                     'not valid data atype：{} user: {}'.format(atype, self.user))
+                return
             else:
                 payload = data[header_length:]
 
