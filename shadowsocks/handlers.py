@@ -90,6 +90,9 @@ class LocalHandler(TimeoutHandler):
         except:
             pool.sentry.captureException()
 
+        if clean:
+            self.destroy()
+
     def write(self, data):
         '''
         针对tcp/udp分别写数据
