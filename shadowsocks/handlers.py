@@ -73,6 +73,16 @@ class LocalHandler(TimeoutHandler):
         self._peername = None
         self._transport = None
 
+    def traffic_filter(self):
+        if pool.filter_user(self.user) is False:
+            return False
+        elif self._transport is None:
+            return False
+        elif self._transport._sock is None:
+            # cpython selector_events _SelectorTransport
+            return False
+        return True
+
     def close(self, clean=False):
         try:
             if self._transport_protocol == flag.TRANSPORT_TCP:
@@ -98,8 +108,8 @@ class LocalHandler(TimeoutHandler):
         针对tcp/udp分别写数据
         '''
         try:
-            # filter user&transport
-            if pool.filter_user(self.user) is False or self._transport is None:
+            # filter traffic
+            if self.traffic_filter() is False:
                 self.close(clean=True)
                 return
             if self._transport_protocol == flag.TRANSPORT_TCP:
